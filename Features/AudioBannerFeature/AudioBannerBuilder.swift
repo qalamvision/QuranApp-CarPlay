@@ -31,7 +31,6 @@ public struct AudioBannerBuilder {
             analytics: container.analytics,
             reciterRetreiver: reciterRetriever,
             recentRecitersService: recentRecitersService,
-            audioPlayer: playbackController.player,
             downloader: playbackController.audioDownloader,
             playbackController: playbackController,
             reciterListBuilder: ReciterListBuilder(),

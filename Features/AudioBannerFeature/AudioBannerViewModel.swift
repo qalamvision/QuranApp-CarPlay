@@ -31,7 +31,7 @@ public protocol AudioBannerListener: AnyObject {
     func highlightReadingAyah(_ ayah: AyahNumber?)
 }
 
-private enum PlaybackState {
+private enum PlaybackState: Equatable {
     case playing
     case paused
     case stopped
@@ -48,7 +48,6 @@ public final class AudioBannerViewModel: ObservableObject {
         analytics: AnalyticsLibrary,
         reciterRetreiver: ReciterDataRetriever,
         recentRecitersService: RecentRecitersService,
-        audioPlayer: QuranAudioPlayer,
         downloader: QuranAudioDownloader,
         playbackController: AudioPlaybackController,
         reciterListBuilder: ReciterListBuilder,
@@ -57,15 +56,13 @@ public final class AudioBannerViewModel: ObservableObject {
         self.analytics = analytics
         self.reciterRetreiver = reciterRetreiver
         self.recentRecitersService = recentRecitersService
-        self.audioPlayer = audioPlayer
         self.downloader = downloader
         self.playbackController = playbackController
         self.reciterListBuilder = reciterListBuilder
         self.advancedAudioOptionsBuilder = advancedAudioOptionsBuilder
         playbackRate = AudioPreferences.shared.playbackRate
 
-        setUpAudioPlayerActions()
-        setUpRemoteCommandHandler()
+        observePlaybackController()
 
         AudioPreferences.shared.$playbackRate.assign(to: &$playbackRate)
     }
@@ -98,7 +95,6 @@ public final class AudioBannerViewModel: ObservableObject {
     }
 
     func start() async {
-        remoteCommandsHandler?.startListeningToPlayCommand()
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(applicationDidBecomeActive),
@@ -121,6 +117,8 @@ public final class AudioBannerViewModel: ObservableObject {
                 }.asCancellableTask()
             )
         }
+
+        synchronizePlayback(with: playbackController.snapshot)
     }
 
     func updatePlaybackRate(to rate: Float) {
@@ -137,9 +135,7 @@ public final class AudioBannerViewModel: ObservableObject {
     private let recentRecitersService: RecentRecitersService
     private let preferences = ReciterPreferences.shared
     private let lastAyahFinder: LastAyahFinder = PreferencesLastAyahFinder.shared
-    private let audioPlayer: QuranAudioPlayer
     private let downloader: QuranAudioDownloader
-    private var remoteCommandsHandler: RemoteCommandsHandler?
     private let reciterListBuilder: ReciterListBuilder
     private let advancedAudioOptionsBuilder: AdvancedAudioOptionsBuilder
 
@@ -147,6 +143,7 @@ public final class AudioBannerViewModel: ObservableObject {
     private var listRuns: Runs = .one
     private var reciters: [Reciter] = []
     private var cancellableTasks: Set<CancellableTask> = []
+    private var playbackObserverId: UUID?
 
     @Published private var playingState: PlaybackState = .stopped {
         didSet {
@@ -173,9 +170,6 @@ public final class AudioBannerViewModel: ObservableObject {
             crasher.setValue(selectedReciter.id, forKey: .reciterId)
         }
         listener?.highlightReadingAyah(nil)
-
-        remoteCommandsHandler?.stopListening()
-        remoteCommandsHandler?.startListeningToPlayCommand()
     }
 
     @objc
@@ -186,7 +180,7 @@ public final class AudioBannerViewModel: ObservableObject {
     }
 
     private func selectReciter(_ reciter: Reciter) {
-        preferences.lastSelectedReciterId = reciter.id
+        playbackController.setReciter(reciter)
     }
 
     // MARK: - Playback Controls
@@ -211,8 +205,6 @@ public final class AudioBannerViewModel: ObservableObject {
         guard selectedReciter != nil else {
             return
         }
-
-        audioPlayer.stopAudio()
 
         let end = to ?? lastAyahFinder.findLastAyah(startAyah: from)
         audioRange = (start: from, end: end)
@@ -302,17 +294,7 @@ public final class AudioBannerViewModel: ObservableObject {
         playbackEnded()
     }
 
-    // MARK: - Audio Interactor Delegate
-
-    private func setUpAudioPlayerActions() {
-        let actions = QuranAudioPlayerActions(
-            playbackEnded: { [weak self] in self?.playbackEnded() },
-            playbackPaused: { [weak self] in self?.playbackPaused() },
-            playbackResumed: { [weak self] in self?.playbackResumed() },
-            playing: { [weak self] in self?.playing(ayah: $0) }
-        )
-        audioPlayer.setActions(actions)
-    }
+    // MARK: - Shared Playback
 
     private func playbackPaused() {
         logger.info("AudioBanner: playback paused")
@@ -328,6 +310,44 @@ public final class AudioBannerViewModel: ObservableObject {
         logger.info("AudioBanner: playing verse \(ayah)")
         crasher.setValue(ayah, forKey: .playingAyah)
         listener?.highlightReadingAyah(ayah)
+    }
+
+    private func observePlaybackController() {
+        playbackObserverId = playbackController.addObserver { [weak self] snapshot in
+            self?.synchronizePlayback(with: snapshot)
+        }
+    }
+
+    private func synchronizePlayback(with snapshot: AudioPlaybackController.Snapshot) {
+        if let request = snapshot.request {
+            audioRange = (start: request.start, end: request.end)
+            verseRuns = request.verseRuns
+            listRuns = request.listRuns
+        }
+
+        if let reciter = snapshot.reciter, !reciters.contains(reciter) {
+            reciters.append(reciter)
+            reciters.sort { $0.localizedName.localizedCaseInsensitiveCompare($1.localizedName) == .orderedAscending }
+        }
+
+        if let ayah = snapshot.currentAyah {
+            playing(ayah: ayah)
+        } else if case .stopped = snapshot.playbackState {
+            listener?.highlightReadingAyah(nil)
+        }
+
+        switch snapshot.playbackState {
+        case .playing:
+            playingState = .playing
+        case .paused:
+            playbackPaused()
+        case .stopped:
+            if playingState != .stopped {
+                playbackEnded()
+            }
+        case .downloading(let progress):
+            playingState = .downloading(progress: progress)
+        }
     }
 
     // MARK: - State changes
@@ -366,7 +386,6 @@ public final class AudioBannerViewModel: ObservableObject {
         logger.info("AudioBanner: playing started")
         cancellableTasks = []
         crasher.setValue(false, forKey: .downloadingQuran)
-        remoteCommandsHandler?.startListening()
         playingState = .playing
 
         guard let audioRange else {
@@ -429,17 +448,6 @@ extension AudioBannerViewModel {
 }
 
 extension AudioBannerViewModel {
-    private func setUpRemoteCommandHandler() {
-        let remoteActions = RemoteCommandActions(
-            play: { [weak self] in self?.handlePlayCommand() },
-            pause: { [weak self] in self?.handlePauseCommand() },
-            togglePlayPause: { [weak self] in self?.handleTogglePlayPauseCommand() },
-            nextTrack: { [weak self] in self?.handleNextTrackCommand() },
-            previousTrack: { [weak self] in self?.handlePreviousTrackCommand() }
-        )
-        remoteCommandsHandler = RemoteCommandsHandler(center: .shared(), actions: remoteActions)
-    }
-
     private func handlePlayCommand() {
         logger.info("AudioBanner: play command fired. State: \(playingState)")
         switch playingState {
@@ -490,7 +498,7 @@ extension AudioBannerViewModel: ReciterListListener {
 
     public func onSelectedReciterChanged(to reciter: Reciter) {
         logger.info("AudioBanner: onSelectedReciterChanged to \(reciter.id)")
-        selectReciter(reciter)
+        playbackController.setReciter(reciter)
         playingState = .stopped
     }
 }

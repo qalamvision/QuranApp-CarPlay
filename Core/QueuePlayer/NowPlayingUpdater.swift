@@ -55,13 +55,12 @@ public class NowPlayingUpdater {
     private let center: MPNowPlayingInfoCenter
 
     private var nowPlayingInfo: [String: Any]? {
-        didSet {
-            center.nowPlayingInfo = nowPlayingInfo
-        }
+        get { center.nowPlayingInfo }
+        set { center.nowPlayingInfo = newValue }
     }
 
     private func update(_ values: [String: Any]) {
-        var info = nowPlayingInfo ?? [:]
+        var info = center.nowPlayingInfo ?? nowPlayingInfo ?? [:]
         for (key, value) in values {
             info[key] = value
         }
