@@ -47,6 +47,8 @@ public class AppWhatsNewController {
 
     private func present(_ versions: [WhatsNewVersion], in parent: UIViewController) {
         let whatsNewItems = versions.flatMap(\.items).map(\.whatsNewItem)
+        let latestVersion = latestVersion(from: versions)
+        store.prepare(version: latestVersion)
 
         let whatsNew = WhatsNew(
             title: l("new.title"),
@@ -58,6 +60,7 @@ public class AppWhatsNewController {
 
         configuration.completionButton.title = l("new.action")
         configuration.completionButton.action = .custom { vc in
+            self.store.markSeen(version: latestVersion)
             vc.dismiss(animated: true)
             logger.info("WhatsNew continue button tapped")
         }
@@ -98,6 +101,12 @@ public class AppWhatsNewController {
         let appWhatsNew = try! decoder.decode(AppWhatsNew.self, from: data) // swiftlint:disable:this force_try
 
         return appWhatsNew
+    }
+
+    private nonisolated func latestVersion(from versions: [WhatsNewVersion]) -> String {
+        versions.map(\.version).max {
+            $0.compare($1, options: .numeric) == .orderedAscending
+        } ?? "0"
     }
 }
 
