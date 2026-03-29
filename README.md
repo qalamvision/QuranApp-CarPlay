@@ -2,7 +2,7 @@
     <img src="https://github.com/quran/quran-ios/assets/5665498/636ff859-78e9-40aa-96ea-db013197b6fc" width="350pt">
 </p>
 
-QuranEngine (CarPlay fork)
+QuranEngine, Quran.com-ios App (w/ CarPlay)
 =========================
 
 This repository is a fork of `quran/quran-ios` that adds a working Apple CarPlay integration to the included example app (`Example/QuranEngineApp`).
